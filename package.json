@@ -1,0 +1,12 @@
+{
+  "name": "emnapi-main-thread-init-repro",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "cargo build --target wasm32-wasip1-threads --release",
+    "repro": "node scripts/repro.mjs"
+  },
+  "dependencies": {
+    "@emnapi/wasi-threads": "1.2.1"
+  }
+}
