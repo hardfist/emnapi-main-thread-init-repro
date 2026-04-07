@@ -1,89 +1,99 @@
-Title: threaded WASI main thread is not initialized before pthread/TLS APIs are used
+Title: threaded WASI napi-rs module can fail in worker bootstrap with `memory access out of bounds`
 
 ## Summary
 
-I can reproduce a threaded WASI runtime bug where the main thread behaves as if `__wasi_init_tp()` was never called.
+I can reproduce a threaded WASI failure through a minimal `napi-rs` wasm module loaded with:
 
-In a minimal `wasm32-wasip1-threads` cdylib instantiated with `@emnapi/wasi-threads`, this causes:
+- `@napi-rs/wasm-runtime`
+- `@emnapi/core`
+- `@emnapi/runtime`
+- `emnapi`
+- `node:wasi`
+- worker-thread based threaded WASI
 
-- `pthread_key_create()` to succeed
-- the following `pthread_key_delete()` to hang forever on the main thread
+This is meant to be aligned with rspack's threaded WASI runtime path, not a raw wasm export repro.
 
-If I manually call `__wasi_init_tp()` first, the exact same `pthread_key_delete()` path returns normally.
+The failure is flaky, but `./repro.sh` in the attached repo usually reproduces it within a few attempts.
 
-This looks like the main thread's `pthread_t` / TLS runtime is not initialized before threaded WASI APIs are used.
+## Versions
 
-## Environment
+Pinned to the same versions rspack currently uses:
+
+- Rust `napi = 3.8.3`
+- Rust `napi-derive = 3.5.2`
+- Rust `napi-build = 2.3.1`
+- `@napi-rs/wasm-runtime = 1.1.2`
+- `@emnapi/core = 1.9.2`
+- `@emnapi/runtime = 1.9.2`
+- `emnapi = 1.9.2`
+
+Environment used for verification:
 
 - Node: `v24.14.1`
-- Rust: `rustc 1.93.0-nightly (01867557c 2025-11-12)`
-- `@emnapi/wasi-threads`: `1.2.1`
+- Rust target: `wasm32-wasip1-threads`
 
 ## Repro
 
-Files are in this directory.
-
-Build:
+Clone the repo and run:
 
 ```bash
-rustup target add wasm32-wasip1-threads
-cargo build --target wasm32-wasip1-threads --release
+./repro.sh
 ```
 
-Failing case:
+What the script does:
 
-```bash
-timeout 10s node run.mjs delete-first
-```
-
-Observed:
-
-- exits with `124`
-- stderr stops at:
-
-```text
-repro_pthread_key_delete_first: enter
-repro_pthread_key_delete_first: after create ret=0 key=0
-repro_pthread_key_delete_first: before delete key=0
-```
+1. install dependencies
+2. build the `napi-rs` wasm module
+3. run a single-threaded control case
+4. run repeated multi-threaded attempts until the failure is observed
 
 Control case:
 
 ```bash
-timeout 10s node run.mjs init-then-delete-first
+env NODE_NO_WARNINGS=1 RAYON_NUM_THREADS=1 \
+  node stress.mjs --modules 4096 --items-per-module 32 --unique-values 4096 --repeat 1 --runs 1
 ```
 
-Observed:
+This consistently succeeds.
+
+Flaky case:
+
+```bash
+env NODE_NO_WARNINGS=1 RAYON_NUM_THREADS=32 \
+  node stress.mjs --modules 4096 --items-per-module 32 --unique-values 4096 --repeat 1 --runs 1
+```
+
+This may succeed on some attempts, but repeated runs eventually fail with either:
+
+- `worker (tid = ...) sent an error! memory access out of bounds`
+- or a timeout / hang
+
+## Representative failure
+
+One captured failure from this repro:
 
 ```text
-repro_call_wasi_init_tp: enter
-repro_call_wasi_init_tp: exit
-repro_pthread_key_delete_first: enter
-repro_pthread_key_delete_first: after create ret=0 key=0
-repro_pthread_key_delete_first: before delete key=0
-repro_pthread_key_delete_first: after delete ret=0
+worker (tid = 59) sent an error! memory access out of bounds
+
+Error [RuntimeError]: memory access out of bounds
+    at emnapi_main_thread_init_repro.wasm.calloc
+    at emnapi_main_thread_init_repro.wasm.__rust_alloc_zeroed
+    at emnapi_main_thread_init_repro.wasm.rayon_core::registry::WorkerThread::from
+    at emnapi_main_thread_init_repro.wasm.rayon_core::registry::ThreadBuilder::run
+    at emnapi_main_thread_init_repro.wasm.std::sys::thread::wasip1::Thread::new::thread_start
+    at emnapi_main_thread_init_repro.wasm.__wasi_thread_start_C
+    at emnapi_main_thread_init_repro.wasm.wasi_thread_start
 ```
 
-## Why I think this is initialization-related
+So the first visible witness is already in threaded worker bootstrap / allocation, not in application logic.
 
-The only difference between the two commands is this:
+## Why I think this is runtime-related
 
-```rust
-unsafe extern "C" {
-  fn __wasi_init_tp();
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn repro_call_wasi_init_tp() -> i32 {
-  unsafe { __wasi_init_tp() };
-  0
-}
-```
-
-Calling it once on the main thread makes the raw pthread TLS path start working immediately.
-
-In a larger real-world case, the same missing initialization later shows up as flaky `memory access out of bounds` crashes in unrelated Rust containers, because the runtime gets corrupted much earlier.
+- The same function succeeds in single-threaded mode.
+- The failing function is only building `IndexMap<String, u32>` values in `rayon` workers.
+- The trap occurs in worker bootstrap / allocation paths like `calloc` and `__rust_alloc_zeroed`, before any interesting application-specific behavior.
+- The repro goes through `napi-rs + wasm-runtime + emnapi` instead of calling raw wasm exports directly.
 
 ## Expected
 
-The main thread should be initialized before threaded WASI pthread/TLS APIs are used, so `pthread_key_delete()` should return normally without requiring a manual `__wasi_init_tp()` call from user code.
+The same threaded `napi-rs` wasm module should either always succeed or fail deterministically with a normal Rust panic / JS exception, not intermittently trap with `memory access out of bounds` or hang during worker bootstrap.

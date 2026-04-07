@@ -1,7 +1,0 @@
-[target.wasm32-wasip1-threads]
-rustflags = [
-  "-Clink-arg=--export=malloc",
-  "-Clink-arg=--export=free",
-  "-Clink-arg=--export=calloc",
-  "-Clink-arg=--export=realloc",
-]

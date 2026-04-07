@@ -1,12 +1,22 @@
 # emnapi main-thread init repro
 
-This repository reproduces a threaded WASI main-thread initialization bug with `@emnapi/wasi-threads`.
+This repository reproduces a threaded WASI failure through the same high-level stack rspack uses:
 
-The repro is intentionally small:
+- Rust `napi-rs` exports
+- `wasm32-wasip1-threads`
+- `@napi-rs/wasm-runtime`
+- `@emnapi/core` / `@emnapi/runtime`
+- worker-based threaded WASI
 
-- a tiny `wasm32-wasip1-threads` cdylib
-- one raw pthread TLS path: `pthread_key_create()` then `pthread_key_delete()`
-- one control path that first calls `__wasi_init_tp()`
+The repro uses the same versions rspack currently uses:
+
+- Rust `napi = 3.8.3`
+- Rust `napi-derive = 3.5.2`
+- Rust `napi-build = 2.3.1`
+- `@napi-rs/wasm-runtime = 1.1.2`
+- `@emnapi/core = 1.9.2`
+- `@emnapi/runtime = 1.9.2`
+- `emnapi = 1.9.2`
 
 ## One-click repro
 
@@ -16,35 +26,62 @@ The repro is intentionally small:
 
 What it does:
 
-1. installs the Node dependency
-2. ensures the Rust target exists
-3. builds the wasm
-4. runs the failing case
-5. runs the control case
+1. installs the pinned JS dependencies
+2. builds the `napi-rs` wasm module
+3. runs a single-threaded control case
+4. runs repeated multi-threaded attempts until the failure is observed
 
 Expected result:
 
-- `delete-first` times out after printing `before delete key=0`
-- `init-then-delete-first` returns `0`
+- the single-threaded control case succeeds
+- one of the multi-threaded attempts eventually fails with either:
+  - `worker (tid = ...) sent an error! memory access out of bounds`
+  - a timeout / hang
+
+On my machine, a representative failure looks like:
+
+```text
+worker (tid = 59) sent an error! memory access out of bounds
+
+Error [RuntimeError]: memory access out of bounds
+    at ...calloc
+    at ...__rust_alloc_zeroed
+    at ...rayon_core::registry::WorkerThread::from
+    at ...rayon_core::registry::ThreadBuilder::run
+    at ...std::sys::thread::wasip1::Thread::new::thread_start
+    at ...__wasi_thread_start_C
+    at ...wasi_thread_start
+```
 
 ## Manual repro
 
+Install and build:
+
 ```bash
 npm install
-npm run repro
+node scripts/build-wasm.mjs
 ```
 
-Or step by step:
+Single-threaded control:
 
 ```bash
-rustup target add wasm32-wasip1-threads
-cargo build --target wasm32-wasip1-threads --release
-timeout 10s node run.mjs delete-first
-timeout 10s node run.mjs init-then-delete-first
+env NODE_NO_WARNINGS=1 RAYON_NUM_THREADS=1 \
+  node stress.mjs --modules 4096 --items-per-module 32 --unique-values 4096 --repeat 1 --runs 1
 ```
 
-## Why this is a bug
+Flaky multi-threaded case:
 
-The only difference between the failing path and the control path is an explicit call to `__wasi_init_tp()`.
+```bash
+env NODE_NO_WARNINGS=1 RAYON_NUM_THREADS=32 \
+  node stress.mjs --modules 4096 --items-per-module 32 --unique-values 4096 --repeat 1 --runs 1
+```
 
-Without it, the main thread's `pthread_t` is not initialized before pthread/TLS APIs are used. In larger real-world threaded WASI modules, this later shows up as unrelated memory corruption and flaky `memory access out of bounds` crashes.
+If that single attempt happens to pass, run it a few more times or just use:
+
+```bash
+node scripts/repro.mjs
+```
+
+## Why this repo is aligned with rspack
+
+This is not a raw wasm export repro. The failing function is a `#[napi]` export loaded through `binding.cjs`, which uses the same `@napi-rs/wasm-runtime` + worker-thread loading style that rspack uses for its threaded WASI build.

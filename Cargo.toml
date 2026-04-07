@@ -6,4 +6,13 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[dependencies]
+indexmap = "2"
+napi = { version = "=3.8.3", default-features = false, features = ["napi9", "compat-mode"] }
+napi-derive = { version = "=3.5.2", features = ["compat-mode"] }
+rayon = "1"
+
+[build-dependencies]
+napi-build = "=2.3.1"
+
 [workspace]

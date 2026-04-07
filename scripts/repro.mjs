@@ -31,33 +31,58 @@ function run(command, args, options = {}) {
 }
 
 async function main() {
-  console.log("==> ensuring Rust target");
-  let result = await run("rustup", ["target", "add", "wasm32-wasip1-threads"]);
+  console.log("==> building napi-rs wasm");
+  let result = await run("node", ["scripts/build-wasm.mjs"]);
   if (result.code !== 0) {
     process.exit(result.code ?? 1);
   }
 
-  console.log("==> building wasm");
-  result = await run("cargo", ["build", "--target", "wasm32-wasip1-threads", "--release"]);
-  if (result.code !== 0) {
-    process.exit(result.code ?? 1);
-  }
+  const stressArgs = [
+    "stress.mjs",
+    "--modules",
+    "4096",
+    "--items-per-module",
+    "32",
+    "--unique-values",
+    "4096",
+    "--repeat",
+    "1",
+    "--runs",
+    "1",
+  ];
 
-  console.log("==> failing case: delete-first");
-  result = await run("node", ["run.mjs", "delete-first"], { timeoutMs: 10_000 });
-  if (!result.timedOut) {
-    console.error("expected delete-first to hang and hit timeout");
+  console.log("==> control case: single-threaded");
+  result = await run("node", stressArgs, {
+    timeoutMs: 15_000,
+    env: {
+      NODE_NO_WARNINGS: "1",
+      RAYON_NUM_THREADS: "1",
+    },
+  });
+  if (result.code !== 0 || result.timedOut) {
+    console.error("expected single-threaded control case to complete successfully");
     process.exit(1);
   }
 
-  console.log("==> control case: init-then-delete-first");
-  result = await run("node", ["run.mjs", "init-then-delete-first"], { timeoutMs: 10_000 });
-  if (result.code !== 0 || result.timedOut) {
-    console.error("expected init-then-delete-first to complete successfully");
-    process.exit(result.code ?? 1);
+  console.log("==> flaky case: repeated multi-threaded attempts");
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    console.log(`==> attempt ${attempt}/10`);
+    result = await run("node", stressArgs, {
+      timeoutMs: 15_000,
+      env: {
+        NODE_NO_WARNINGS: "1",
+        RAYON_NUM_THREADS: "32",
+      },
+    });
+
+    if (result.code !== 0 || result.timedOut) {
+      console.log("==> reproduced");
+      return;
+    }
   }
 
-  console.log("==> reproduced");
+  console.error("did not observe the flaky failure within 10 attempts");
+  process.exit(1);
 }
 
 await main();
